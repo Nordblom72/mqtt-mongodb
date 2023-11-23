@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/local/bin node
 
 const { dbHandler } = require('./src/db');
 const mqtt = require('mqtt');
