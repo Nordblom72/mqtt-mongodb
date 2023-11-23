@@ -54,8 +54,8 @@ const conData = {
   clean: true,
   connectTimeout: 4000,
   reconnectPeriod: 1000,
-  username: '',
-  password: ''
+  username: `${process.env.MQTT_USR}`,
+  password: `${process.env.MQTT_PSW}`
 }
 
 const convertFromUtcToLocalDate = (utcDateObj) => {

@@ -3,10 +3,11 @@ const { MongoClient, ServerApiVersion  } = require('mongodb')
 const username = "";
 const password = "";
 const atlasPath = "";
-const database = "solardb";
+const database = "";
 const MONGODB_DEFAULTS = {
-  url: 'mongodb+srv://' + `${username}` + ':' + `${password}` + `${atlasPath}`,
-  database: database
+  url: 'mongodb+srv://' + `${process.env.MONGODB_USER}` + ':' + `${process.env.MONGODB_PSW}` + `${process.env.MONGODB_URI}`,
+  database: `${process.env.MONGODB_DATABASE}`,
+  collection: `${process.env.MONGODB_COLLECTION}`
 }
 
 const mongoClient = new MongoClient(MONGODB_DEFAULTS.url, {
@@ -27,7 +28,7 @@ const dbHandler = async (opType, context) => {
     console.log("    dbHandler(), Pinged your deployment. You successfully connected to MongoDB!");
 
     const database = clientPromise.db(MONGODB_DEFAULTS.database);
-    const collection = database.collection('monthlyPwrData');
+    const collection = database.collection(MONGODB_DEFAULTS.COLLECTION);
     
     if (opType === 'update') {
       rsp = await collection.updateOne(context.identifier, context.data);
