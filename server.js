@@ -28,8 +28,7 @@ const setUpdatePeriodMinutes = () => {
     }
   }
   console.log("Configuring default update frequency towards Mongo DB to 12.");
-  return (2);
-  //return (5);
+  return (5);
 }
 
 console.log("Server started: ", convertFromUtcToLocalDate(new Date()));
