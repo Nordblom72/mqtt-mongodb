@@ -19,16 +19,17 @@ const mongoClient = new MongoClient(MONGODB_DEFAULTS.url, {
 });
 
 const dbHandler = async (opType, context) => {
-  console.log("    dbHandler(), opType: ", opType);
+  //console.log("    dbHandler(), opType: ", opType);
   let rsp;
   try {
     const clientPromise = await mongoClient.connect({ maxIdleTimeMS : 270000, minPoolSize : 2, maxPoolSize : 4 });
     // Send a ping to confirm a successful connection
-    await mongoClient.db("admin").command({ ping: 1 });
-    console.log("    dbHandler(), Pinged your deployment. You successfully connected to MongoDB!");
+    //await mongoClient.db("admin").command({ ping: 1 });
+    //console.log("    dbHandler(), Pinged your deployment. You successfully connected to MongoDB!");
 
     const database = clientPromise.db(MONGODB_DEFAULTS.database);
-    const collection = database.collection(MONGODB_DEFAULTS.collection);
+    //const collection = database.collection(MONGODB_DEFAULTS.collection);
+    const collection = database.collection('mqtt-test');
     
     if (opType === 'update') {
       rsp = await collection.updateOne(context.identifier, context.data);
@@ -44,7 +45,7 @@ const dbHandler = async (opType, context) => {
   } finally {
     // Ensures that the client will close when you finish/error
     await mongoClient.close();
-    console.log("    dbHandler(), Successfully dis-connected from MongoDB!");
+    //console.log("    dbHandler(), Successfully dis-connected from MongoDB!");
     return (rsp);
   } 
 }
