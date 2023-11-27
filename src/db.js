@@ -28,8 +28,7 @@ const dbHandler = async (opType, context) => {
     //console.log("    dbHandler(), Pinged your deployment. You successfully connected to MongoDB!");
 
     const database = clientPromise.db(MONGODB_DEFAULTS.database);
-    //const collection = database.collection(MONGODB_DEFAULTS.collection);
-    const collection = database.collection('mqtt-test');
+    const collection = database.collection(MONGODB_DEFAULTS.collection);
     
     if (opType === 'update') {
       rsp = await collection.updateOne(context.identifier, context.data);
