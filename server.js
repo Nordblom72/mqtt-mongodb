@@ -178,7 +178,7 @@ client.on("message", (topic, message, packet) => {
     } else if ((minutes%updatePeriod === 1) && (seconds > 48)) {  // End of measurement period ?
       measurement.stopValueExport = parseFloat(message.toString()).toFixed(numOfDecimals); // message is Buffer
       measurement.numReceivedBursts++;
-      if (minutes == 59) {
+      if (minutes == (60-updatePeriod)) {
         measurement.isEndOfHour = true;
       }
     } else {
