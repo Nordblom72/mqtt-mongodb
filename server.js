@@ -17,7 +17,7 @@ const convertFromUtcToLocalDate = (utcDateObj) => {
 }
 
 const setUpdatePeriodMinutes = () => {
-  const validNumbers = [2,3,4,5,6,10,12];
+  const validNumbers = [2,3,4,5,6,10,12,15,20,30]; // Number of DB updates per hour
   if (`${process.env.MONGODB_UPDATE_FREQUECY}` != 'undefined' && typeof(parseInt(`${process.env.MONGODB_UPDATE_FREQUECY}`)) === 'number' ) {
     if (validNumbers.includes(parseInt(`${process.env.MONGODB_UPDATE_FREQUECY}`))) {
       console.log("Desired update frequency towards Mongo DB is ", parseInt(`${process.env.MONGODB_UPDATE_FREQUECY}`));
@@ -178,7 +178,7 @@ client.on("message", (topic, message, packet) => {
     } else if ((minutes%updatePeriod === 1) && (seconds > 48)) {  // End of measurement period ?
       measurement.stopValueExport = parseFloat(message.toString()).toFixed(numOfDecimals); // message is Buffer
       measurement.numReceivedBursts++;
-      if (minutes == (60-updatePeriod)) {
+      if (minutes > (60-updatePeriod)) {
         measurement.isEndOfHour = true;
       }
     } else {
