@@ -16,6 +16,8 @@ const convertFromUtcToLocalDate = (utcDateObj) => {
   return new Date(utcDateObj.getTime() - offset * 60000);
 }
 
+const numDaysInMonth = (year, month) => new Date(year, month, 0).getDate();
+
 const setUpdatePeriodMinutes = () => {
   const validNumbers = [2,3,4,5,6,10,12,15,20,30]; // Number of DB updates per hour
   if (`${process.env.MONGODB_UPDATE_FREQUECY}` != 'undefined' && typeof(parseInt(`${process.env.MONGODB_UPDATE_FREQUECY}`)) === 'number' ) {
@@ -206,14 +208,15 @@ const createDbDayObject = (dateStr) => {
     sold: 0.0,
     bought: 0.0,
     temperature: null,
-    isComplete: false
+    isComplete: false,
+    impExpIsComplete: false
   }
   dayObj = {
     date: dateStr.split('T')[0],
     produced: 0.0,
     sold: 0.0,
     bought: 0.0,
-    isComplete: false,
+    impExpIsComplete: false,
     hours: []
   }
   for(let i=0; i<24; i++) {
@@ -231,7 +234,8 @@ const createDbMonthObj = (dateStr) => {
     monthlyPwrData: {
       produced: 0.0,
       sold: 0.0,
-      bought: 0.0
+      bought: 0.0,
+      impExpIsComplete: false
     },
     dailyPwrData: []
   }
@@ -326,11 +330,12 @@ const updateDb = async (measurement) => {
       dbMonthObj.dailyPwrData[parseInt(day)-1] = dbDayObj;
     }
     if (isFullHour) {
-      dbMonthObj.dailyPwrData[parseInt(day)-1].hours[parseInt(hour)].isComplete = true;
+      dbMonthObj.dailyPwrData[parseInt(day)-1].hours[parseInt(hour)].isComplete = true; // Remove me
+      dbMonthObj.dailyPwrData[parseInt(day)-1].hours[parseInt(hour)].impExpIsComplete = true;
       dbMonthObj.dailyPwrData[parseInt(day)-1].hours[parseInt(hour)].sold = parseFloat(expVal);
       dbMonthObj.dailyPwrData[parseInt(day)-1].hours[parseInt(hour)].bought = parseFloat(impVal);
     } else {
-      console.log("Ackumulating hour");
+      console.log("Ackumulating hourly data");
       dbMonthObj.dailyPwrData[parseInt(day)-1].hours[parseInt(hour)].sold += parseFloat(expVal);
       dbMonthObj.dailyPwrData[parseInt(day)-1].hours[parseInt(hour)].bought += parseFloat(impVal);
       if (dbMonthObj.dailyPwrData[parseInt(day)-1].hours[parseInt(hour)].sold < 0 || dbMonthObj.dailyPwrData[parseInt(day)-1].hours[parseInt(hour)].bought < 0) {
@@ -341,7 +346,8 @@ const updateDb = async (measurement) => {
         dbMonthObj.dailyPwrData[parseInt(day)-1].hours[parseInt(hour)].bought = 0.0;
       }
     }
-    console.log("Ackumulating daily");
+
+    console.log("Ackumulating daily data");
     dbMonthObj.dailyPwrData[parseInt(day)-1].sold = dbMonthObj.dailyPwrData[parseInt(day)-1].hours.reduce(function (acc, obj) { return parseFloat(acc) + obj.sold }, 0.0);
     dbMonthObj.dailyPwrData[parseInt(day)-1].bought = dbMonthObj.dailyPwrData[parseInt(day)-1].hours.reduce(function (acc, obj) { return parseFloat(acc) + obj.bought }, 0.0);
     if (dbMonthObj.dailyPwrData[parseInt(day)-1].sold <0 || dbMonthObj.dailyPwrData[parseInt(day)-1].bought < 0) {
@@ -352,19 +358,44 @@ const updateDb = async (measurement) => {
       dbMonthObj.dailyPwrData[parseInt(day)-1].bought = 0.0
     }
 
+    console.log("Ackumulating monthly data"); // Days may be missing in the mounthly array. Check for null entries in array!
+    dbMonthObj.monthlyPwrData.sold =  dbMonthObj.dailyPwrData.reduce(function (acc, obj) { 
+                                        let sold = 0.0;
+                                        if (obj !== null && obj.hasOwnProperty('sold')) {sold=obj.sold}
+                                        return parseFloat(acc) + sold 
+                                      }, 0.0);
+    dbMonthObj.monthlyPwrData.bought = dbMonthObj.dailyPwrData.reduce(function (acc, obj) {
+                                        let bought = 0.0;
+                                        if (obj !== null && obj.hasOwnProperty('bought')) {bought=obj.bought}
+                                        return parseFloat(acc) + bought 
+                                      }, 0.0);
+    console.log("MB ", dbMonthObj.monthlyPwrData.bought);
     // Last update for the day ?
     if (parseInt(hour) === 23 && measurement.isEndOfHour) {
       let complete = true;
       for(let i=0; i<24; i++) {
-        if (dbMonthObj.dailyPwrData[parseInt(day)-1].hours[i].isComplete === false) {
+        if (dbMonthObj.dailyPwrData[parseInt(day)-1].hours[i].isComplete === false) { //ToDo: replace with impExpIsComplete
           complete = false;
           break;
         }
       }
-      dbMonthObj.dailyPwrData[parseInt(day)-1].isComplete = complete;
+      dbMonthObj.dailyPwrData[parseInt(day)-1].impExpIsComplete = complete;
+    }
+
+    // Last update in month ?
+    if (day == numDaysInMonth(year, month) && measurement.isEndOfHour) {
+      const numDays = numDaysInMonth(year, month);
+      let complete = true;
+      for(let d=0; d <= numDays; d++) {
+        if (dbMonthObj.dailyPwrData[parseInt(day)-1].impExpIsComplete === false) {
+          complete = false;
+          break;
+        }
+      }
+      dbMonthObj.monthlyPwrData.impExpIsComplete = complete;
     }
     
-    let setQuery = { identifier: { _id: dbMonthObj._id }, data: { $set: { dailyPwrData: dbMonthObj.dailyPwrData } } };
+    let setQuery = { identifier: { _id: dbMonthObj._id }, data: { $set: { dailyPwrData: dbMonthObj.dailyPwrData, monthlyPwrData: dbMonthObj.monthlyPwrData } } };
     await dbHandler('update', setQuery)
     .then((acknowledged) => {
         if (!acknowledged) {
