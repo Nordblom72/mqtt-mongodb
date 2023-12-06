@@ -9,7 +9,6 @@ let minutes;
 let deviceRoot="NS1PWR/p1ib/";
 let starting = true;
 
-
 const monthsAsTextList = ['January', 'February', 'Mars', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 const convertFromUtcToLocalDate = (utcDateObj) => {
   const offset = utcDateObj.getTimezoneOffset();
@@ -17,13 +16,13 @@ const convertFromUtcToLocalDate = (utcDateObj) => {
 }
 
 const numDaysInMonth = (year, month) => new Date(year, month, 0).getDate();
-
+const updateFrequency = `${process.env.MONGODB_UPDATE_FREQUECY}`;
 const setUpdatePeriodMinutes = () => {
   const validNumbers = [2,3,4,5,6,10,12,15,20,30]; // Number of DB updates per hour
   if (`${process.env.MONGODB_UPDATE_FREQUECY}` != 'undefined' && typeof(parseInt(`${process.env.MONGODB_UPDATE_FREQUECY}`)) === 'number' ) {
     if (validNumbers.includes(parseInt(`${process.env.MONGODB_UPDATE_FREQUECY}`))) {
       console.log("Desired update frequency towards Mongo DB is ", parseInt(`${process.env.MONGODB_UPDATE_FREQUECY}`));
-      return (60/ parseInt(`${process.env.MONGODB_UPDATE_FREQUECY}`));
+      return (60/parseInt(`${process.env.MONGODB_UPDATE_FREQUECY}`));
     } else {
       console.log("WARNING: Invalid update frequency", `${process.env.MONGODB_UPDATE_FREQUECY}`);
       console.log("Valid values for update frequency are: ", validNumbers);
@@ -57,19 +56,29 @@ const client = mqtt.connect("mqtt://192.168.1.215:1883", conData);
 // in DB as defined by updatePeriod.
 let measurement = {
   date: null,
-  periodLength: 10*updatePeriod, //Seconds
   numExpectedBursts: 6*updatePeriod,
   numReceivedBursts: 0,
   startValueImport: 0.0,
-  stopValueImport: 0.0,
   startValueExport: 0.0,
-  stopValueExport: 0.0,
   startOfHour: {
     impValue: 0.0,
     expValue: 0.0,
-    date: null
+    prevImpValue: 0.0,
+    prevExpValue: 0.0,
+    date: null,
+    prevDate: null
   },
+  sendToDbObj: {
+    date: null,
+    startImpVal: 0.0,
+    stopImpVal: 0.0,
+    startExpVal: 0.0,
+    stopExpVal: 0.0
+  },
+  ongoing: false,
+  isStartOfHour: false,
   isEndOfHour: false,
+  gotFullMeasPeriod: false
 }
 
 const clearMeasObj = (measObj) => {
@@ -77,8 +86,6 @@ const clearMeasObj = (measObj) => {
   measObj.numReceivedBursts = 0.0;
   measObj.startValueExport = 0.0;
   measObj.startValueImport = 0.0;
-  measObj.stopValueExport = 0.0;
-  measObj.stopValueImport = 0.0;
 
   if (measObj.isEndOfHour) {
     measObj.startOfHour.impValue = 0.0;
@@ -88,6 +95,7 @@ const clearMeasObj = (measObj) => {
   }
 }
 
+// ToDo: Improve value validation in case of bad respone from DB
 const getMeasCacheinDb = async (date, hour) => {
   if (date.includes('T')) {
     date = date.split('T')[0];
@@ -101,6 +109,7 @@ const getMeasCacheinDb = async (date, hour) => {
         return [null, null, null];
       }
     }
+    return [null, null, null];
   });
 }
 
@@ -128,8 +137,11 @@ const recoverStartData = async (date, aaa) => {
 }
 
 if (starting) {
-  recoverStartData(convertFromUtcToLocalDate(new Date()).toISOString());
-  starting = false;
+  recoverStartData(convertFromUtcToLocalDate(new Date()).toISOString())
+  .then(function(value) {
+    starting = false;
+    return value;
+  });
 }
 
 const topics = {
@@ -149,58 +161,124 @@ client.on("connect", () => {
 
 client.on("message", (topic, message, packet) => {
   //let key=topic.replace(deviceRoot,'');
-  if (topic === 'NS1PWR/p1ib/p1ib_clock_date/state') {
-    minutes = message.toString().split(':')[1];
-    seconds =  message.toString().split(':')[2].split('Z')[0];
-    if ((minutes%updatePeriod === 0) && (seconds < 8)) {
-      clearMeasObj(measurement);
-      measurement.date = convertFromUtcToLocalDate(new Date(message.toString())).toISOString(); // message is Buffer
-      console.log("New measurement period started: ", measurement.date);
-    }
-    if (minutes == 0  && (seconds < 8)) {
-      measurement.startOfHour.date = convertFromUtcToLocalDate(new Date(message.toString())).toISOString(); // message is Buffer
-      measurement.date = null; 
-    }
-  } else if (topic === 'NS1PWR/p1ib/p1ib_h_active_imp_q1_q4/state') {
-    // Start of measurement period ?
-    if ((minutes%updatePeriod === 0) && (seconds < 8)) {
-      measurement.numReceivedBursts = 1;
-      measurement.startValueImport = parseFloat(message.toString()).toFixed(numOfDecimals); // message is Buffer
-    } else if ((minutes%updatePeriod === 1) && (seconds > 48)) { // End of measurement period ?
-      measurement.stopValueImport = parseFloat(message.toString()).toFixed(numOfDecimals); // message is Buffer
-    }
+  if (!starting) {
+    // Date + Time
+    if (topic === 'NS1PWR/p1ib/p1ib_clock_date/state') {
+      let date = convertFromUtcToLocalDate(new Date(message.toString())).toISOString(); // message is Buffer
+      //console.log("       1: ", date);
+      measurement.date = date;  // ... save the date for each burst (i.e. every 10th second) ?
+      minutes = message.toString().split(':')[1];
+      seconds = message.toString().split(':')[2].split('Z')[0];
 
-    if (minutes == 0  && (seconds < 8)) {
-      measurement.startOfHour.impValue = parseFloat(message.toString()).toFixed(numOfDecimals); // message is Buffer
-    }
-  } else if (topic === 'NS1PWR/p1ib/p1ib_h_active_exp_q2_q3/state') {
-    // Start of measurement period ?
-    if ((minutes%updatePeriod === 0) && (seconds < 8)) {
-      measurement.startValueExport = parseFloat(message.toString()).toFixed(numOfDecimals); // message is Buffer
-    } else if ((minutes%updatePeriod === 1) && (seconds > 48)) {  // End of measurement period ?
-      measurement.stopValueExport = parseFloat(message.toString()).toFixed(numOfDecimals); // message is Buffer
-      measurement.numReceivedBursts++;
-      if (minutes > (60-updatePeriod)) {
-        measurement.isEndOfHour = true;
+      // 1st meas burst of hour?
+      if (minutes == 0  && (seconds < 8)) { // start of hour. 1st meas period
+        measurement.startOfHour.prevDate = measurement.startOfHour.date;
+        measurement.startOfHour.date = date;
       }
-    } else {
-      measurement.numReceivedBursts++;
-    }
-    if (minutes == 0  && (seconds < 8)) {
-      measurement.startOfHour.expValue = parseFloat(message.toString()).toFixed(numOfDecimals); // message is Buffer
-    }
-  }
+      // New Measuerement period start?
+      if ((minutes%updatePeriod === 0) && (seconds < 8)) {
+        //measurement.date = date // Save the date for every start of hour
+        measurement.ongoing = true;
+        console.log("--------- New measurement period started: ", measurement.date);
+      }
 
-  if (measurement.numReceivedBursts === measurement.numExpectedBursts) {
-    console.log("Diff IMP: ", measurement.stopValueImport-measurement.startValueImport);
-    console.log("Diff EXP: ", measurement.stopValueExport-measurement.startValueExport);
-    console.log("Send to DB")
-    updateDb(JSON.parse(JSON.stringify(measurement))); // Send a copy of the measurement Object to updateDb ...
+    // Import value  
+    } else if (measurement.ongoing && topic === 'NS1PWR/p1ib/p1ib_h_active_imp_q1_q4/state') {
+      //console.log("       2: ");
+      // Last measurement burst for ongoing period?
+      if (measurement.numReceivedBursts === (measurement.numExpectedBursts - 1) && (minutes%updatePeriod === 0) && (seconds < 8)) {
+        measurement.sendToDbObj.startImpVal  = measurement.startValueImport; // Save startValueImport now as it will be overwtritten in next step
+        measurement.sendToDbObj.stopImpVal   = parseFloat(message.toString()).toFixed(numOfDecimals); // message is Buffer
+        console.log("Got last meas for period: IMP");
+      }
+      // 1st meas burst of hour?
+      if (minutes == 0  && (seconds < 8)) {
+        measurement.startOfHour.prevImpValue = measurement.startOfHour.impValue; // Back-up before overwriting
+        measurement.startOfHour.impValue = parseFloat(message.toString()).toFixed(numOfDecimals); // message is Buffer
+        console.log("  IMPORT (startOfHour.impValue): ", measurement.startOfHour.impValue);
+      }
+      // New Measuerement period start?
+      if ((minutes%updatePeriod === 0) && (seconds < 8)) {
+        measurement.startValueImport = parseFloat(message.toString()).toFixed(numOfDecimals); // message is Buffer
+        console.log("    IMPORT (startValueImport): ", measurement.startValueImport);
+      }
 
-    clearMeasObj(measurement);
+    // Export value
+    } else if (measurement.ongoing && topic === 'NS1PWR/p1ib/p1ib_h_active_exp_q2_q3/state') {
+      //console.log("       3: ");
+      // Last measurement burst for ongoing period?
+      if (measurement.numReceivedBursts === (measurement.numExpectedBursts - 1) && (minutes%updatePeriod === 0) && (seconds < 8)) {
+          measurement.sendToDbObj.startExpVal = measurement.startValueExport; // Save startValueExport now as it will be overwtritten in next step
+          measurement.sendToDbObj.stopExpVal = parseFloat(message.toString()).toFixed(numOfDecimals); // message is Buffer
+          //console.log("Got last meas for period: EXP");
+          measurement.gotFullMeasPeriod = true;
+      }
+      // 1st meas burst of hour?
+      if (minutes == 0  && (seconds < 8)) {
+        measurement.isStartOfHour = true;
+        measurement.startOfHour.prevExpValue = measurement.startOfHour.expValue; //Back-up before overwiriting
+        measurement.startOfHour.expValue = parseFloat(message.toString()).toFixed(numOfDecimals); // message is Buffer
+        //console.log("    EXPORT (.startOfHour.expValue): ", measurement.startOfHour.expValue);
+      }
+      // New Measuerement period start?
+      if ((minutes%updatePeriod === 0) && (seconds < 8)) {
+        measurement.startValueExport = parseFloat(message.toString()).toFixed(numOfDecimals); // message is Buffer
+        console.log("    EXPORT (startValueExport): ", measurement.startValueExport);
+      } else {
+        measurement.numReceivedBursts++;
+        //console.log("       numReceivedBursts ++ ", measurement.numReceivedBursts);
+      }
+    }
+
+    if (measurement.gotFullMeasPeriod) {
+      console.log("*** gotFullMeasPeriod ***")
+      measurement.gotFullMeasPeriod = false;
+      measurement.numReceivedBursts = 0;
+      let tmpObj = {
+        date:             measurement.date,
+        startValueImport: measurement.sendToDbObj.startImpVal,
+        startValueExport: measurement.sendToDbObj.startExpVal,
+        stopValueImport:  measurement.sendToDbObj.stopImpVal,
+        stopValueExport:  measurement.sendToDbObj.stopExpVal,
+        startOfHour: {
+          prevImpValue: measurement.startOfHour.prevImpValue,
+          prevExpValue: measurement.startOfHour.prevExpValue,
+          impValue:     measurement.startOfHour.impValue,
+          expValue:     measurement.startOfHour.expValue,
+          prevDate:     measurement.startOfHour.prevDate,
+          date:         measurement.startOfHour.date
+        },
+        isStartOfHour: measurement.isStartOfHour,
+        isEndOfHour: measurement.isEndOfHour
+      };
+
+      let send = true;
+      if (tmpObj.startValueImport == 0 || tmpObj.startValueExport == 0) {
+        console.log(" BAD VALUES");
+        send = false;
+      }
+      if (send) {
+        updateDb(JSON.parse(JSON.stringify(tmpObj))); // Send a copy of the measurement Object to updateDb ...
+      }
+
+      // Clear
+      measurement.sendToDbObj.date = null;
+      measurement.sendToDbObj.startImpVal = 0.0;
+      measurement.sendToDbObj.startExpVal = 0.0;
+      measurement.sendToDbObj.stopImpVal = 0.0;
+      measurement.sendToDbObj.stopExpVal = 0.0;
+      measurement.isStartOfHour = false;
+    }
+
+    if (measurement.numReceivedBursts >= measurement.numExpectedBursts) {
+      // Ooops, something went wrong, reset the counter
+      console.log("WARNING, bad state: numReceivedBursts counter exceeds max value. Clearing the coutner!")
+      measurement.numReceivedBursts = 0;
+    }
   }
   //client.end(); 
 });
+
 
 const createDbDayObject = (dateStr) => {
   hrObj = {
@@ -271,38 +349,49 @@ const updateMeasCacheinDb = async (date, hour, impVal, expVal) => {
 }
 
 const updateDb = async (measurement) => {
+  //console.log(JSON.stringify(measurement, null, 2));
   let hour, minute, rest;
   let year, month, day;
   let impVal, expVal = 0.0;
   let date;
-  let islastUpdateForDay, isFullHour = false;
+  let isFullHour = false;
 
-  console.log("")
-  if (measurement.startOfHour.date !== null  && measurement.date === null) {
-    console.log("Is start of hour: ",measurement.startOfHour.date );
-    date = measurement.startOfHour.date;
-    [hr, ...rest] = measurement.startOfHour.date.split('T')[1].split(':');
-    await updateMeasCacheinDb(date, parseInt(hr), parseFloat(measurement.startOfHour.impValue), parseFloat(measurement.startOfHour.expValue));
+  console.log("");
+  if (measurement.startOfHour.prevDate !== null && measurement.isStartOfHour) {
+    console.log(JSON.stringify(measurement, null, 2));
+    date = measurement.startOfHour.prevDate; // It s start of hour, but the meas data is for last meas period of previous hour
   } else {
-    console.log("Is NOT start of hour");
-    date = measurement.date;
+    date = measurement.date; // Ackumulated update
+  }
+
+  // Save start of hour data in DB as backup ?
+  if (measurement.isStartOfHour) {
+    console.log("Is start of hour: ",measurement.startOfHour.date);
+    [hr, ...rest] = measurement.startOfHour.date.split('T')[1].split(':');
+    await updateMeasCacheinDb(measurement.startOfHour.date, parseInt(hr), parseFloat(measurement.startOfHour.impValue), parseFloat(measurement.startOfHour.expValue)); 
   }
 
   [hour, minute, ...rest] = date.split('T')[1].split(':');
   [year, month, day, ...rest] = date.split('T')[0].split('-');
 
   // Calculate diff values for impVal & expVal
-  if (measurement.startOfHour.date !== null && measurement.isEndOfHour) {
+  if (measurement.startOfHour.prevDate !== null && measurement.isStartOfHour) {
       console.log("Is full hour: ",measurement.startOfHour.date );
       isFullHour = true;
-      impVal = parseFloat(measurement.stopValueImport - measurement.startOfHour.impValue).toFixed(numOfDecimals);
-      expVal = parseFloat(measurement.stopValueExport - measurement.startOfHour.expValue).toFixed(numOfDecimals);
+      impVal = parseFloat(measurement.startOfHour.impValue - measurement.startOfHour.prevImpValue).toFixed(numOfDecimals);
+      expVal = parseFloat(measurement.startOfHour.expValue - measurement.startOfHour.prevExpValue).toFixed(numOfDecimals);
+      console.log("FULL Hr IMP: ", impVal);
+      console.log("FULL Hr EXP: ", expVal);
+      //[hour, minute, ...rest] = measurement.startOfHour.date.split('T')[1].split(':');
+      //[year, month, day, ...rest] = measurement.startOfHour.date.split('T')[0].split('-');
   } else {
     console.log("Is ackumulated update: ");
-    console.log("DDD IMP: ", measurement.stopValueImport - measurement.startValueImport);
-    console.log("DDD EXP: ", measurement.stopValueExport - measurement.startValueExport);
+    //console.log("ACK IMP: ", measurement.stopValueImport - measurement.startValueImport);
+    //console.log("ACK EXP: ", measurement.stopValueExport - measurement.startValueExport);
     impVal = parseFloat(measurement.stopValueImport - measurement.startValueImport).toFixed(numOfDecimals);
     expVal = parseFloat(measurement.stopValueExport - measurement.startValueExport).toFixed(numOfDecimals);
+    //console.log("    ACK IMP: ", impVal);
+    //console.log("    ACK EXP: ", expVal);
   }
 
   let monthName = monthsAsTextList[month-1]; // monthNr  0-11
@@ -340,7 +429,7 @@ const updateDb = async (measurement) => {
       dbMonthObj.dailyPwrData[parseInt(day)-1].hours[parseInt(hour)].bought += parseFloat(impVal);
       if (dbMonthObj.dailyPwrData[parseInt(day)-1].hours[parseInt(hour)].sold < 0 || dbMonthObj.dailyPwrData[parseInt(day)-1].hours[parseInt(hour)].bought < 0) {
         // In case of bad luck in interrupted service or other reasons... clear the ackumulative values and
-        // hope that the full hour update will fix correct valeus
+        // hope that the full hour update will fix correct values
         console.log("Negative values detected for hourly object, clearing ...");
         dbMonthObj.dailyPwrData[parseInt(day)-1].hours[parseInt(hour)].sold = 0.0;
         dbMonthObj.dailyPwrData[parseInt(day)-1].hours[parseInt(hour)].bought = 0.0;
@@ -369,9 +458,9 @@ const updateDb = async (measurement) => {
                                         if (obj !== null && obj.hasOwnProperty('bought')) {bought=obj.bought}
                                         return parseFloat(acc) + bought 
                                       }, 0.0);
-    console.log("MB ", dbMonthObj.monthlyPwrData.bought);
+    //console.log("MB ", dbMonthObj.monthlyPwrData.bought);
     // Last update for the day ?
-    if (parseInt(hour) === 23 && measurement.isEndOfHour) {
+    if (parseInt(hour) === 23 && measurement.isStartOfHour) {
       let complete = true;
       for(let i=0; i<24; i++) {
         if (dbMonthObj.dailyPwrData[parseInt(day)-1].hours[i].isComplete === false) { //ToDo: replace with impExpIsComplete
@@ -383,7 +472,7 @@ const updateDb = async (measurement) => {
     }
 
     // Last update in month ?
-    if (day == numDaysInMonth(year, month) && measurement.isEndOfHour) {
+    if (day == numDaysInMonth(year, month) && measurement.isStartOfHour) {
       const numDays = numDaysInMonth(year, month);
       let complete = true;
       for(let d=0; d <= numDays; d++) {
@@ -407,9 +496,9 @@ const updateDb = async (measurement) => {
     });
   }
 
-  console.log("QUERY: ", query);
-  console.log("BOUGHT ", impVal);
-  console.log("SOLD   ", expVal);
+  //console.log("QUERY: ", query);
+  //console.log("BOUGHT ", impVal);
+  //console.log("SOLD   ", expVal);
   //console.log(JSON.stringify(dbMonthObj, null, 2));
 
 	/*let query = { 
