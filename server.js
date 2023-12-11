@@ -9,14 +9,22 @@ let minutes;
 let deviceRoot="NS1PWR/p1ib/";
 let starting = true;
 
-const monthsAsTextList = ['January', 'February', 'Mars', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+const pingDb = async () => {
+  await dbHandler('ping', {})
+  .then(function(acknowledged) {
+    if (!acknowledged) {
+      console.log("ERROR: DB ping check failed...!");
+    }
+  })
+};
+
 const convertFromUtcToLocalDate = (utcDateObj) => {
   const offset = utcDateObj.getTimezoneOffset();
   return new Date(utcDateObj.getTime() - offset * 60000);
 }
+const monthsAsTextList = ['January', 'February', 'Mars', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+const numDaysInMonth = (year, month) => convertFromUtcToLocalDate(new Date(year, month, 0)).getDate();
 
-const numDaysInMonth = (year, month) => new Date(year, month, 0).getDate();
-const updateFrequency = `${process.env.MONGODB_UPDATE_FREQUECY}`;
 const setUpdatePeriodMinutes = () => {
   const validNumbers = [2,3,4,5,6,10,12,15,20,30]; // Number of DB updates per hour
   if (`${process.env.MONGODB_UPDATE_FREQUECY}` != 'undefined' && typeof(parseInt(`${process.env.MONGODB_UPDATE_FREQUECY}`)) === 'number' ) {
@@ -34,21 +42,7 @@ const setUpdatePeriodMinutes = () => {
 
 console.log("Server started: ", convertFromUtcToLocalDate(new Date()));
 const updatePeriod = setUpdatePeriodMinutes();
-console.log("Database update period is set to every ", updatePeriod, " minute.");
-
-const clientId = `mqtt_${Math.random().toString(16).slice(3)}`;
-const conData = {
-  clientId,
-  clean: true,
-  connectTimeout: 4000,
-  reconnectPeriod: 1000,
-  username: `${process.env.MQTT_USR}`,
-  password: `${process.env.MQTT_PSW}`
-}
-
-//const client = mqtt.connect("mqtt://test.mosquitto.org");
-//const client = mqtt.connect("mqtt://localhost:1883", conData);
-const client = mqtt.connect("mqtt://192.168.1.215:1883", conData);
+console.log("Database update period is set to every ", updatePeriod, " minutes.");
 
 // The p1IB sends measurement data every 10 seconds
 // DB will be updated as defined by updatePeriod (i.e. every updatePerion minutes)
@@ -77,43 +71,36 @@ let measurement = {
   },
   ongoing: false,
   isStartOfHour: false,
-  isEndOfHour: false,
   gotFullMeasPeriod: false
 }
 
-const clearMeasObj = (measObj) => {
-  measObj.date = null;
-  measObj.numReceivedBursts = 0.0;
-  measObj.startValueExport = 0.0;
-  measObj.startValueImport = 0.0;
-
-  if (measObj.isEndOfHour) {
-    measObj.startOfHour.impValue = 0.0;
-    measObj.startOfHour.expValue = 0.0;
-    measObj.startOfHour.date = null;
-    measObj.isEndOfHour = false;
-  }
-}
-
-// ToDo: Improve value validation in case of bad respone from DB
 const getMeasCacheinDb = async (date, hour) => {
   if (date.includes('T')) {
     date = date.split('T')[0];
   }
+  let rsp = [null, null, null];
   return await dbHandler('get', { type: 'measCache' })
   .then(function(value) {
-    if (value !== null) {
-      if (value.date.split('T')[0] == date && parseInt(value.hour) == parseInt(hour)) {
-        return [value.date, value.impVal, value.expVal];
-      } else {
-        return [null, null, null];
+    if (value && value !== null) {
+      try {
+        if (value.date.split('T')[0] === date && parseInt(value.hour) === parseInt(hour)) {
+          if ( typeof(value.impVal) === 'number' && typeof(value.expVal) === 'number' ) {
+            rsp = [value.date, value.impVal,value.expVal];
+          }
+        }
+      }
+      catch (error) {
+        console.log("ERROR: Failed parsing response data from DB for measCache document!");
+        console.log("ERROR: Got rsp: ", value);
+        console.log("ERROR: ", error);
+        return(rsp);
       }
     }
-    return [null, null, null];
+    return(rsp);
   });
 }
 
-const recoverStartData = async (date, aaa) => {
+const recoverStartData = async (date) => {
   // Validate start of hour
   [hour, ...rest] = date.split('T')[1].split(':');
   if (measurement.startOfHour.date === null) {
@@ -144,6 +131,26 @@ if (starting) {
   });
 }
 
+const clientId = `mqtt_${Math.random().toString(16).slice(3)}`;
+const conData = {
+  clientId,
+  clean: true,
+  connectTimeout: 4000,
+  reconnectPeriod: 10000,
+  username: `${process.env.MQTT_USR}`,
+  password: `${process.env.MQTT_PSW}`
+}
+//const client = mqtt.connect("mqtt://test.mosquitto.org");
+const client = mqtt.connect("mqtt://localhost:1883", conData);
+
+client.on('error', (error) => {
+  console.error('MQTT connection failed!', error)
+});
+
+client.on('reconnect', (error) => {
+  console.error('MQTT reconnect failed!', error)
+});
+
 const topics = {
   'NS1PWR/p1ib/p1ib_clock_date/state': {qos: 0},
   'NS1PWR/p1ib/p1ib_h_active_imp_q1_q4/state': {qos: 0},
@@ -151,21 +158,22 @@ const topics = {
 };
 
 client.on("connect", () => {
-  console.log("MQTT Client Connected!")
+  console.log("MQTT Client Connected with id: ", clientId);
   client.subscribe(topics, (err) => {
     if (err) {
-      console.log(err)
+      console.log(err);
     }
   });
 });
 
+let numReceivedTopics = 0;
 client.on("message", (topic, message, packet) => {
   //let key=topic.replace(deviceRoot,'');
   if (!starting) {
     // Date + Time
     if (topic === 'NS1PWR/p1ib/p1ib_clock_date/state') {
+      numReceivedTopics = 1;
       let date = convertFromUtcToLocalDate(new Date(message.toString())).toISOString(); // message is Buffer
-      //console.log("       1: ", date);
       measurement.date = date;  // ... save the date for each burst (i.e. every 10th second) ?
       minutes = message.toString().split(':')[1];
       seconds = message.toString().split(':')[2].split('Z')[0];
@@ -177,40 +185,35 @@ client.on("message", (topic, message, packet) => {
       }
       // New Measuerement period start?
       if ((minutes%updatePeriod === 0) && (seconds < 8)) {
-        //measurement.date = date // Save the date for every start of hour
         measurement.ongoing = true;
         console.log("--------- New measurement period started: ", measurement.date);
       }
 
     // Import value  
     } else if (measurement.ongoing && topic === 'NS1PWR/p1ib/p1ib_h_active_imp_q1_q4/state') {
-      //console.log("       2: ");
+      numReceivedTopics ++;
       // Last measurement burst for ongoing period?
       if (measurement.numReceivedBursts === (measurement.numExpectedBursts - 1) && (minutes%updatePeriod === 0) && (seconds < 8)) {
         measurement.sendToDbObj.startImpVal  = measurement.startValueImport; // Save startValueImport now as it will be overwtritten in next step
         measurement.sendToDbObj.stopImpVal   = parseFloat(message.toString()).toFixed(numOfDecimals); // message is Buffer
-        console.log("Got last meas for period: IMP");
       }
       // 1st meas burst of hour?
       if (minutes == 0  && (seconds < 8)) {
         measurement.startOfHour.prevImpValue = measurement.startOfHour.impValue; // Back-up before overwriting
         measurement.startOfHour.impValue = parseFloat(message.toString()).toFixed(numOfDecimals); // message is Buffer
-        console.log("  IMPORT (startOfHour.impValue): ", measurement.startOfHour.impValue);
       }
       // New Measuerement period start?
       if ((minutes%updatePeriod === 0) && (seconds < 8)) {
         measurement.startValueImport = parseFloat(message.toString()).toFixed(numOfDecimals); // message is Buffer
-        console.log("    IMPORT (startValueImport): ", measurement.startValueImport);
       }
 
     // Export value
     } else if (measurement.ongoing && topic === 'NS1PWR/p1ib/p1ib_h_active_exp_q2_q3/state') {
-      //console.log("       3: ");
+      numReceivedTopics ++;
       // Last measurement burst for ongoing period?
       if (measurement.numReceivedBursts === (measurement.numExpectedBursts - 1) && (minutes%updatePeriod === 0) && (seconds < 8)) {
           measurement.sendToDbObj.startExpVal = measurement.startValueExport; // Save startValueExport now as it will be overwtritten in next step
           measurement.sendToDbObj.stopExpVal = parseFloat(message.toString()).toFixed(numOfDecimals); // message is Buffer
-          //console.log("Got last meas for period: EXP");
           measurement.gotFullMeasPeriod = true;
       }
       // 1st meas burst of hour?
@@ -218,20 +221,23 @@ client.on("message", (topic, message, packet) => {
         measurement.isStartOfHour = true;
         measurement.startOfHour.prevExpValue = measurement.startOfHour.expValue; //Back-up before overwiriting
         measurement.startOfHour.expValue = parseFloat(message.toString()).toFixed(numOfDecimals); // message is Buffer
-        //console.log("    EXPORT (.startOfHour.expValue): ", measurement.startOfHour.expValue);
       }
       // New Measuerement period start?
       if ((minutes%updatePeriod === 0) && (seconds < 8)) {
         measurement.startValueExport = parseFloat(message.toString()).toFixed(numOfDecimals); // message is Buffer
-        console.log("    EXPORT (startValueExport): ", measurement.startValueExport);
       } else {
+        //measurement.numReceivedBursts++;
+      }
+    }
+
+    if (numReceivedTopics === Object.keys(topics).length) {
+      if ((minutes%updatePeriod !== 0) || (seconds > 7)) {
         measurement.numReceivedBursts++;
-        //console.log("       numReceivedBursts ++ ", measurement.numReceivedBursts);
+        numReceivedTopics = 0;
       }
     }
 
     if (measurement.gotFullMeasPeriod) {
-      console.log("*** gotFullMeasPeriod ***")
       measurement.gotFullMeasPeriod = false;
       measurement.numReceivedBursts = 0;
       let tmpObj = {
@@ -248,19 +254,12 @@ client.on("message", (topic, message, packet) => {
           prevDate:     measurement.startOfHour.prevDate,
           date:         measurement.startOfHour.date
         },
-        isStartOfHour: measurement.isStartOfHour,
-        isEndOfHour: measurement.isEndOfHour
+        isStartOfHour: measurement.isStartOfHour
       };
 
-      let send = true;
-      if (tmpObj.startValueImport == 0 || tmpObj.startValueExport == 0) {
-        console.log(" BAD VALUES");
-        send = false;
-      }
-      if (send) {
+      if (!(tmpObj.startValueImport == 0 || tmpObj.startValueExport == 0)) {
         updateDb(JSON.parse(JSON.stringify(tmpObj))); // Send a copy of the measurement Object to updateDb ...
       }
-
       // Clear
       measurement.sendToDbObj.date = null;
       measurement.sendToDbObj.startImpVal = 0.0;
@@ -269,22 +268,22 @@ client.on("message", (topic, message, packet) => {
       measurement.sendToDbObj.stopExpVal = 0.0;
       measurement.isStartOfHour = false;
     }
+    tmpObj = {};
 
     if (measurement.numReceivedBursts >= measurement.numExpectedBursts) {
       // Ooops, something went wrong, reset the counter
-      console.log("WARNING, bad state: numReceivedBursts counter exceeds max value. Clearing the coutner!")
+      console.log("WARNING, bad state: numReceivedBursts counter exceeds max value. Clearing the counter!")
       measurement.numReceivedBursts = 0;
     }
   }
   //client.end(); 
 });
 
-
 const createDbDayObject = (dateStr) => {
   hrObj = {
     produced: 0.0,
-    sold: 0.0,
-    bought: 0.0,
+    exported: 0.0,
+    imported: 0.0,
     temperature: null,
     isComplete: false,
     impExpIsComplete: false
@@ -292,8 +291,8 @@ const createDbDayObject = (dateStr) => {
   dayObj = {
     date: dateStr.split('T')[0],
     produced: 0.0,
-    sold: 0.0,
-    bought: 0.0,
+    exported: 0.0,
+    imported: 0.0,
     impExpIsComplete: false,
     hours: []
   }
@@ -304,29 +303,29 @@ const createDbDayObject = (dateStr) => {
 }
 
 const createDbMonthObj = (dateStr) => {
-  [year, month, ...rest] = dateStr.split('T')[0].split('-');
+  [year, month, day, ...rest] = dateStr.split('T')[0].split('-');
 
   dbMonthObj = {
     year: parseInt(year),
     monthName: monthsAsTextList[month-1], // monthNr  0-11
     monthlyPwrData: {
       produced: 0.0,
-      sold: 0.0,
-      bought: 0.0,
+      exported: 0.0,
+      imported: 0.0,
       impExpIsComplete: false
     },
     dailyPwrData: []
   }
-  // ToDo: hmmm, create empty days until yesteday or ignore?
-  /*const dayObj = createDbDayObject('');
-  for(let i=0; i<numDaysInMonth; i++) {
+  // If it isn't 1:th of month, then create day objects until 'yesterday'
+  const dayObj = createDbDayObject('');
+  for(let i=0; i<(day - 1); i++) { // Until yesterday
     dbMonthObj.dailyPwrData[i] = Object.assign({}, dayObj);
-  }*/
+    dbMonthObj.dailyPwrData[i].date = convertFromUtcToLocalDate(new Date(`${year} ${month} ${i+1}`)).toISOString().split('T')[0];
+  }
   return dbMonthObj;
 }
 
 const updateMeasCacheinDb = async (date, hour, impVal, expVal) => {
-  //const newCacheData = { type: 'measCache', date: date.split('T')[0], hour: hour, impVal: impVal, expVal: expVal };
   const newCacheData = { type: 'measCache', date: date, hour: hour, impVal: impVal, expVal: expVal };
   let cache = await dbHandler('get', { type: 'measCache' })
   .then(function(value) {
@@ -338,13 +337,15 @@ const updateMeasCacheinDb = async (date, hour, impVal, expVal) => {
     .then((acknowledged) => {
       if (!acknowledged) {
         console.log("ERROR:   updateMeasCacheinDb(), FAILED to update DB with hourly start-up data!");
-      }
-      console.log("  updateMeasCacheinDb(), DB updated with hourly start-up data.");
+      } else {console.log("DB updated with new measueremnt cache data.")}
     });
   } else {
     await dbHandler('create', newCacheData)
-    .then(function(value) {
-    })
+    .then(function(acknowledged) {
+      if (!acknowledged) { 
+        console.log("ERROR:   updateMeasCacheinDb(), FAILED to create new measCache object in DB!");
+      } else {console.log("DB updated/created with new measueremnt cache object.")}
+    });
   }
 }
 
@@ -356,9 +357,7 @@ const updateDb = async (measurement) => {
   let date;
   let isFullHour = false;
 
-  console.log("");
   if (measurement.startOfHour.prevDate !== null && measurement.isStartOfHour) {
-    console.log(JSON.stringify(measurement, null, 2));
     date = measurement.startOfHour.prevDate; // It s start of hour, but the meas data is for last meas period of previous hour
   } else {
     date = measurement.date; // Ackumulated update
@@ -366,7 +365,6 @@ const updateDb = async (measurement) => {
 
   // Save start of hour data in DB as backup ?
   if (measurement.isStartOfHour) {
-    console.log("Is start of hour: ",measurement.startOfHour.date);
     [hr, ...rest] = measurement.startOfHour.date.split('T')[1].split(':');
     await updateMeasCacheinDb(measurement.startOfHour.date, parseInt(hr), parseFloat(measurement.startOfHour.impValue), parseFloat(measurement.startOfHour.expValue)); 
   }
@@ -376,22 +374,12 @@ const updateDb = async (measurement) => {
 
   // Calculate diff values for impVal & expVal
   if (measurement.startOfHour.prevDate !== null && measurement.isStartOfHour) {
-      console.log("Is full hour: ",measurement.startOfHour.date );
       isFullHour = true;
       impVal = parseFloat(measurement.startOfHour.impValue - measurement.startOfHour.prevImpValue).toFixed(numOfDecimals);
       expVal = parseFloat(measurement.startOfHour.expValue - measurement.startOfHour.prevExpValue).toFixed(numOfDecimals);
-      console.log("FULL Hr IMP: ", impVal);
-      console.log("FULL Hr EXP: ", expVal);
-      //[hour, minute, ...rest] = measurement.startOfHour.date.split('T')[1].split(':');
-      //[year, month, day, ...rest] = measurement.startOfHour.date.split('T')[0].split('-');
   } else {
-    console.log("Is ackumulated update: ");
-    //console.log("ACK IMP: ", measurement.stopValueImport - measurement.startValueImport);
-    //console.log("ACK EXP: ", measurement.stopValueExport - measurement.startValueExport);
     impVal = parseFloat(measurement.stopValueImport - measurement.startValueImport).toFixed(numOfDecimals);
     expVal = parseFloat(measurement.stopValueExport - measurement.startValueExport).toFixed(numOfDecimals);
-    //console.log("    ACK IMP: ", impVal);
-    //console.log("    ACK EXP: ", expVal);
   }
 
   let monthName = monthsAsTextList[month-1]; // monthNr  0-11
@@ -404,14 +392,17 @@ const updateDb = async (measurement) => {
   if (dbMonthObj === null) {
     dbMonthObj = createDbMonthObj(date);
     dbDayObj = createDbDayObject(date);
-    dbDayObj.hours[parseInt(hour)].sold = parseFloat(expVal);
-    dbDayObj.hours[parseInt(hour)].bought = parseFloat(impVal);
-    dbDayObj.sold = dbDayObj.hours.reduce(function (acc, obj) { return parseFloat(acc) + obj.sold }, 0.0);
-    dbDayObj.bought = dbDayObj.hours.reduce(function (acc, obj) { return parseFloat(acc) + obj.bought }, 0.0);
+    dbDayObj.hours[parseInt(hour)].exported = parseFloat(expVal);
+    dbDayObj.hours[parseInt(hour)].imported = parseFloat(impVal);
+    dbDayObj.exported = dbDayObj.hours.reduce(function (acc, obj) { return parseFloat(acc) + obj.exported }, 0.0);
+    dbDayObj.imported = dbDayObj.hours.reduce(function (acc, obj) { return parseFloat(acc) + obj.imported }, 0.0);
     dbMonthObj.dailyPwrData[parseInt(day)-1]=(dbDayObj);
     await dbHandler('create', dbMonthObj)
-    .then(function(value) {
-    })
+    .then(function(acknowledged) {
+      if (!acknowledged) { 
+        console.log("ERROR: Failed to create new month object in DB!")
+      } else {console.log("DB updated/created new month object.")}
+    });
   } else {
     // Check if current dayObj exists in the received monthObj
     if (!dbMonthObj.dailyPwrData[parseInt(day)-1]) {
@@ -421,44 +412,45 @@ const updateDb = async (measurement) => {
     if (isFullHour) {
       dbMonthObj.dailyPwrData[parseInt(day)-1].hours[parseInt(hour)].isComplete = true; // Remove me
       dbMonthObj.dailyPwrData[parseInt(day)-1].hours[parseInt(hour)].impExpIsComplete = true;
-      dbMonthObj.dailyPwrData[parseInt(day)-1].hours[parseInt(hour)].sold = parseFloat(expVal);
-      dbMonthObj.dailyPwrData[parseInt(day)-1].hours[parseInt(hour)].bought = parseFloat(impVal);
+      dbMonthObj.dailyPwrData[parseInt(day)-1].hours[parseInt(hour)].exported = parseFloat(expVal);
+      dbMonthObj.dailyPwrData[parseInt(day)-1].hours[parseInt(hour)].imported = parseFloat(impVal);
     } else {
-      console.log("Ackumulating hourly data");
-      dbMonthObj.dailyPwrData[parseInt(day)-1].hours[parseInt(hour)].sold += parseFloat(expVal);
-      dbMonthObj.dailyPwrData[parseInt(day)-1].hours[parseInt(hour)].bought += parseFloat(impVal);
-      if (dbMonthObj.dailyPwrData[parseInt(day)-1].hours[parseInt(hour)].sold < 0 || dbMonthObj.dailyPwrData[parseInt(day)-1].hours[parseInt(hour)].bought < 0) {
+      // Ackumulate hourly data
+      dbMonthObj.dailyPwrData[parseInt(day)-1].hours[parseInt(hour)].exported += parseFloat(expVal);
+      dbMonthObj.dailyPwrData[parseInt(day)-1].hours[parseInt(hour)].imported += parseFloat(impVal);
+      if (dbMonthObj.dailyPwrData[parseInt(day)-1].hours[parseInt(hour)].exported < 0 || dbMonthObj.dailyPwrData[parseInt(day)-1].hours[parseInt(hour)].imported < 0) {
         // In case of bad luck in interrupted service or other reasons... clear the ackumulative values and
         // hope that the full hour update will fix correct values
         console.log("Negative values detected for hourly object, clearing ...");
-        dbMonthObj.dailyPwrData[parseInt(day)-1].hours[parseInt(hour)].sold = 0.0;
-        dbMonthObj.dailyPwrData[parseInt(day)-1].hours[parseInt(hour)].bought = 0.0;
+        dbMonthObj.dailyPwrData[parseInt(day)-1].hours[parseInt(hour)].exported = 0.0;
+        dbMonthObj.dailyPwrData[parseInt(day)-1].hours[parseInt(hour)].imported = 0.0;
       }
     }
 
-    console.log("Ackumulating daily data");
-    dbMonthObj.dailyPwrData[parseInt(day)-1].sold = dbMonthObj.dailyPwrData[parseInt(day)-1].hours.reduce(function (acc, obj) { return parseFloat(acc) + obj.sold }, 0.0);
-    dbMonthObj.dailyPwrData[parseInt(day)-1].bought = dbMonthObj.dailyPwrData[parseInt(day)-1].hours.reduce(function (acc, obj) { return parseFloat(acc) + obj.bought }, 0.0);
-    if (dbMonthObj.dailyPwrData[parseInt(day)-1].sold <0 || dbMonthObj.dailyPwrData[parseInt(day)-1].bought < 0) {
+    
+    // Ackumulate daily data
+    dbMonthObj.dailyPwrData[parseInt(day)-1].exported = dbMonthObj.dailyPwrData[parseInt(day)-1].hours.reduce(function (acc, obj) { return parseFloat(acc) + obj.exported }, 0.0);
+    dbMonthObj.dailyPwrData[parseInt(day)-1].imported = dbMonthObj.dailyPwrData[parseInt(day)-1].hours.reduce(function (acc, obj) { return parseFloat(acc) + obj.imported }, 0.0);
+    if (dbMonthObj.dailyPwrData[parseInt(day)-1].exported <0 || dbMonthObj.dailyPwrData[parseInt(day)-1].imported < 0) {
       // In case of bad luck in interrupted service or other reasons... clear the ackumulative values and
       // hope that the full hour update will fix correct valeus
       console.log("Negative values detected for daily object, clearing ...");
-      dbMonthObj.dailyPwrData[parseInt(day)-1].sold = 0.0;
-      dbMonthObj.dailyPwrData[parseInt(day)-1].bought = 0.0
+      dbMonthObj.dailyPwrData[parseInt(day)-1].exported = 0.0;
+      dbMonthObj.dailyPwrData[parseInt(day)-1].imported = 0.0
     }
 
-    console.log("Ackumulating monthly data"); // Days may be missing in the mounthly array. Check for null entries in array!
-    dbMonthObj.monthlyPwrData.sold =  dbMonthObj.dailyPwrData.reduce(function (acc, obj) { 
+    // Ackumulate monthly data
+    // Days may be missing in the mounthly array. Check for null entries in array!
+    dbMonthObj.monthlyPwrData.exported =  dbMonthObj.dailyPwrData.reduce(function (acc, obj) { 
                                         let sold = 0.0;
-                                        if (obj !== null && obj.hasOwnProperty('sold')) {sold=obj.sold}
-                                        return parseFloat(acc) + sold 
+                                        if (obj !== null && obj.hasOwnProperty('sold')) {sold=obj.exported}
+                                        return parseFloat(acc) + sold;
                                       }, 0.0);
-    dbMonthObj.monthlyPwrData.bought = dbMonthObj.dailyPwrData.reduce(function (acc, obj) {
+    dbMonthObj.monthlyPwrData.imported = dbMonthObj.dailyPwrData.reduce(function (acc, obj) {
                                         let bought = 0.0;
-                                        if (obj !== null && obj.hasOwnProperty('bought')) {bought=obj.bought}
-                                        return parseFloat(acc) + bought 
+                                        if (obj !== null && obj.hasOwnProperty('bought')) {bought=obj.imported}
+                                        return parseFloat(acc) + bought;
                                       }, 0.0);
-    //console.log("MB ", dbMonthObj.monthlyPwrData.bought);
     // Last update for the day ?
     if (parseInt(hour) === 23 && measurement.isStartOfHour) {
       let complete = true;
@@ -489,20 +481,7 @@ const updateDb = async (measurement) => {
     .then((acknowledged) => {
         if (!acknowledged) {
             console.log("ERROR:   updateDb(), FAILED to update DB with PWR data");
-           return "FAILED to update DB with PWR data";
-        }
-        console.log("  updateDb(), DB updated with insertion of PWR data");
-          return ("DB updated with insertion of PWR data");
+        }else {console.log("DB updated with new measueremnt data.")}
     });
   }
-
-  //console.log("QUERY: ", query);
-  //console.log("BOUGHT ", impVal);
-  //console.log("SOLD   ", expVal);
-  //console.log(JSON.stringify(dbMonthObj, null, 2));
-
-	/*let query = { 
-    $push: { events: { event: {  value:message, when:new Date() } } }, 
-    upsert:true
-  };*/
 }
