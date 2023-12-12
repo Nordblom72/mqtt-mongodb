@@ -7,7 +7,14 @@ const numOfDecimals = 5;
 let seconds;
 let minutes;
 let deviceRoot="NS1PWR/p1ib/";
-let starting = true;
+
+let stateCtrl = {
+  ongoing: false,
+  gotFullMeasPeriod: false,
+  starting: true,
+  sendToDb: false,
+  isFirstMeasPeriod: true
+}
 
 const pingDb = async () => {
   await dbHandler('ping', {})
@@ -50,8 +57,6 @@ console.log("Database update period is set to every ", updatePeriod, " minutes."
 // in DB as defined by updatePeriod.
 let measurement = {
   date: null,
-  numExpectedBursts: 6*updatePeriod,
-  numReceivedBursts: 0,
   startValueImport: 0.0,
   startValueExport: 0.0,
   startOfHour: {
@@ -69,9 +74,7 @@ let measurement = {
     startExpVal: 0.0,
     stopExpVal: 0.0
   },
-  ongoing: false,
   isStartOfHour: false,
-  gotFullMeasPeriod: false
 }
 
 const getMeasCacheinDb = async (date, hour) => {
@@ -123,10 +126,10 @@ const recoverStartData = async (date) => {
   return (false);
 }
 
-if (starting) {
+if (stateCtrl.starting) {
   recoverStartData(convertFromUtcToLocalDate(new Date()).toISOString())
   .then(function(value) {
-    starting = false;
+    stateCtrl.starting = false;
     return value;
   });
 }
@@ -152,9 +155,9 @@ client.on('reconnect', (error) => {
 });
 
 const topics = {
-  'NS1PWR/p1ib/p1ib_clock_date/state': {qos: 0},
-  'NS1PWR/p1ib/p1ib_h_active_imp_q1_q4/state': {qos: 0},
-  'NS1PWR/p1ib/p1ib_h_active_exp_q2_q3/state': {qos: 0}
+  'NS1PWR/p1ib/p1ib_clock_date/state': {qos: 1},
+  'NS1PWR/p1ib/p1ib_h_active_imp_q1_q4/state': {qos: 1},
+  'NS1PWR/p1ib/p1ib_h_active_exp_q2_q3/state': {qos: 1}
 };
 
 client.on("connect", () => {
@@ -166,13 +169,12 @@ client.on("connect", () => {
   });
 });
 
-let numReceivedTopics = 0;
+
 client.on("message", (topic, message, packet) => {
   //let key=topic.replace(deviceRoot,'');
-  if (!starting) {
+  if (!stateCtrl.starting) {
     // Date + Time
     if (topic === 'NS1PWR/p1ib/p1ib_clock_date/state') {
-      numReceivedTopics = 1;
       let date = convertFromUtcToLocalDate(new Date(message.toString())).toISOString(); // message is Buffer
       measurement.date = date;  // ... save the date for each burst (i.e. every 10th second) ?
       minutes = message.toString().split(':')[1];
@@ -185,15 +187,14 @@ client.on("message", (topic, message, packet) => {
       }
       // New Measuerement period start?
       if ((minutes%updatePeriod === 0) && (seconds < 8)) {
-        measurement.ongoing = true;
+        stateCtrl.ongoing = true;
         console.log("--------- New measurement period started: ", measurement.date);
+        stateCtrl.sendToDb = true;
       }
-
     // Import value  
-    } else if (measurement.ongoing && topic === 'NS1PWR/p1ib/p1ib_h_active_imp_q1_q4/state') {
-      numReceivedTopics ++;
+    } else if (stateCtrl.ongoing && topic === 'NS1PWR/p1ib/p1ib_h_active_imp_q1_q4/state') {
       // Last measurement burst for ongoing period?
-      if (measurement.numReceivedBursts === (measurement.numExpectedBursts - 1) && (minutes%updatePeriod === 0) && (seconds < 8)) {
+      if (stateCtrl.sendToDb) {
         measurement.sendToDbObj.startImpVal  = measurement.startValueImport; // Save startValueImport now as it will be overwtritten in next step
         measurement.sendToDbObj.stopImpVal   = parseFloat(message.toString()).toFixed(numOfDecimals); // message is Buffer
       }
@@ -208,13 +209,13 @@ client.on("message", (topic, message, packet) => {
       }
 
     // Export value
-    } else if (measurement.ongoing && topic === 'NS1PWR/p1ib/p1ib_h_active_exp_q2_q3/state') {
-      numReceivedTopics ++;
+    } else if (stateCtrl.ongoing && topic === 'NS1PWR/p1ib/p1ib_h_active_exp_q2_q3/state') {
       // Last measurement burst for ongoing period?
-      if (measurement.numReceivedBursts === (measurement.numExpectedBursts - 1) && (minutes%updatePeriod === 0) && (seconds < 8)) {
+      if (stateCtrl.sendToDb) {
           measurement.sendToDbObj.startExpVal = measurement.startValueExport; // Save startValueExport now as it will be overwtritten in next step
           measurement.sendToDbObj.stopExpVal = parseFloat(message.toString()).toFixed(numOfDecimals); // message is Buffer
-          measurement.gotFullMeasPeriod = true;
+          stateCtrl.gotFullMeasPeriod = true;
+          stateCtrl.sendToDb = false;
       }
       // 1st meas burst of hour?
       if (minutes == 0  && (seconds < 8)) {
@@ -225,40 +226,24 @@ client.on("message", (topic, message, packet) => {
       // New Measuerement period start?
       if ((minutes%updatePeriod === 0) && (seconds < 8)) {
         measurement.startValueExport = parseFloat(message.toString()).toFixed(numOfDecimals); // message is Buffer
-      } else {
-        //measurement.numReceivedBursts++;
       }
     }
 
-    if (numReceivedTopics === Object.keys(topics).length) {
-      if ((minutes%updatePeriod !== 0) || (seconds > 7)) {
-        measurement.numReceivedBursts++;
-        numReceivedTopics = 0;
-      }
-    }
-
-    if (measurement.gotFullMeasPeriod) {
-      measurement.gotFullMeasPeriod = false;
-      measurement.numReceivedBursts = 0;
-      let tmpObj = {
-        date:             measurement.date,
-        startValueImport: measurement.sendToDbObj.startImpVal,
-        startValueExport: measurement.sendToDbObj.startExpVal,
-        stopValueImport:  measurement.sendToDbObj.stopImpVal,
-        stopValueExport:  measurement.sendToDbObj.stopExpVal,
-        startOfHour: {
-          prevImpValue: measurement.startOfHour.prevImpValue,
-          prevExpValue: measurement.startOfHour.prevExpValue,
-          impValue:     measurement.startOfHour.impValue,
-          expValue:     measurement.startOfHour.expValue,
-          prevDate:     measurement.startOfHour.prevDate,
-          date:         measurement.startOfHour.date
-        },
-        isStartOfHour: measurement.isStartOfHour
-      };
-
-      if (!(tmpObj.startValueImport == 0 || tmpObj.startValueExport == 0)) {
-        updateDb(JSON.parse(JSON.stringify(tmpObj))); // Send a copy of the measurement Object to updateDb ...
+    if (stateCtrl.gotFullMeasPeriod) {
+      stateCtrl.gotFullMeasPeriod = false;
+      if (!(measurement.sendToDbObj.startImpVal == 0 || measurement.sendToDbObj.startExpVal == 0) || !stateCtrl.isFirstMeasPeriod) {
+        updateDb(JSON.parse(JSON.stringify({
+              date:             measurement.date,
+              startValueImport: measurement.sendToDbObj.startImpVal,
+              startValueExport: measurement.sendToDbObj.startExpVal,
+              stopValueImport:  measurement.sendToDbObj.stopImpVal,
+              stopValueExport:  measurement.sendToDbObj.stopExpVal,
+              startOfHour:      measurement.startOfHour,
+              isStartOfHour:    measurement.isStartOfHour
+        }))); // Send a copy of the measurement Object to updateDb ...
+      }else {
+        console.log("SKIPPED UPDATE OF DB ");
+        stateCtrl.isFirstMeasPeriod = false;
       }
       // Clear
       measurement.sendToDbObj.date = null;
@@ -267,13 +252,6 @@ client.on("message", (topic, message, packet) => {
       measurement.sendToDbObj.stopImpVal = 0.0;
       measurement.sendToDbObj.stopExpVal = 0.0;
       measurement.isStartOfHour = false;
-    }
-    tmpObj = {};
-
-    if (measurement.numReceivedBursts >= measurement.numExpectedBursts) {
-      // Ooops, something went wrong, reset the counter
-      console.log("WARNING, bad state: numReceivedBursts counter exceeds max value. Clearing the counter!")
-      measurement.numReceivedBursts = 0;
     }
   }
   //client.end(); 
