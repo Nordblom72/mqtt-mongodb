@@ -443,12 +443,12 @@ const updateDb = async (measurement) => {
     // Days may be missing in the mounthly array. Check for null entries in array!
     dbMonthObj.monthlyPwrData.exported =  dbMonthObj.dailyPwrData.reduce(function (acc, obj) { 
                                         let sold = 0.0;
-                                        if (obj !== null && obj.hasOwnProperty('sold')) {sold=obj.exported}
+                                        if (obj !== null && obj.hasOwnProperty('exported')) {sold=obj.exported}
                                         return parseFloat(acc) + sold;
                                       }, 0.0);
     dbMonthObj.monthlyPwrData.imported = dbMonthObj.dailyPwrData.reduce(function (acc, obj) {
                                         let bought = 0.0;
-                                        if (obj !== null && obj.hasOwnProperty('bought')) {bought=obj.imported}
+                                        if (obj !== null && obj.hasOwnProperty('imported')) {bought=obj.imported}
                                         return parseFloat(acc) + bought;
                                       }, 0.0);
     // Last update for the day ?
