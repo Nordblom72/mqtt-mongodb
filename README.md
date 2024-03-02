@@ -16,20 +16,20 @@ There is also an data object holding the import and export yield values which al
 | --------------|-----------|--------------|
 | MONGODB_UPDATE_FREQUECY | Valid values: 2,3,4,5,6,10,12,15,20,30 | Default is 12
 | MQTT_USR |MQTT user|
- MQTT_PSW | MQTT user-password |
+| MQTT_PSW | MQTT user-password |
 | MONGODB_USER | MongoDb user |
 | MONGODB_PSW | MongoDb user-password |
 | MONGODB_URI | MongoDb URL |
 | MONGODB_DATABASE | MongoDb database name |
 | MONGODB_COLLECTION | MongoDb database collection |
 
-## References
+# References
 * [Link to P1IB github repo](https://github.com/remne/p1ib)
 * [Link to Remnetech, the offical site of P1IB](https://remne.tech/)<br/>
 * [MQTT official site](https://mqtt.org/)
 * [MQTT Mosquitto broker ](https://mosquitto.org/)
 
-## ToDo
+# ToDo
 * Increase DbMongo timeout
 * Implement proper error handling for database failures
 * Implement some kind of critical logging to be stored in MongoDb
